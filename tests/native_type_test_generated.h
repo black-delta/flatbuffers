@@ -13,6 +13,7 @@ namespace Geometry {
 struct Vector3D;
 
 struct ApplicationData;
+struct ApplicationDataBuilder;
 struct ApplicationDataT;
 
 inline const flatbuffers::TypeTable *Vector3DTypeTable();
@@ -29,8 +30,10 @@ FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) Vector3D FLATBUFFERS_FINAL_CLASS {
   static const flatbuffers::TypeTable *MiniReflectTypeTable() {
     return Vector3DTypeTable();
   }
-  Vector3D() {
-    memset(static_cast<void *>(this), 0, sizeof(Vector3D));
+  Vector3D()
+      : x_(0),
+        y_(0),
+        z_(0) {
   }
   Vector3D(float _x, float _y, float _z)
       : x_(flatbuffers::EndianScalar(_x)),
@@ -60,13 +63,12 @@ FLATBUFFERS_STRUCT_END(Vector3D, 12);
 
 struct ApplicationDataT : public flatbuffers::NativeTable {
   typedef ApplicationData TableType;
-  std::vector<Native::Vector3D> vectors;
-  ApplicationDataT() {
-  }
+  std::vector<Native::Vector3D> vectors{};
 };
 
 struct ApplicationData FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   typedef ApplicationDataT NativeTableType;
+  typedef ApplicationDataBuilder Builder;
   static const flatbuffers::TypeTable *MiniReflectTypeTable() {
     return ApplicationDataTypeTable();
   }
@@ -91,6 +93,7 @@ struct ApplicationData FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
 };
 
 struct ApplicationDataBuilder {
+  typedef ApplicationData Table;
   flatbuffers::FlatBufferBuilder &fbb_;
   flatbuffers::uoffset_t start_;
   void add_vectors(flatbuffers::Offset<flatbuffers::Vector<const Geometry::Vector3D *>> vectors) {
@@ -100,7 +103,6 @@ struct ApplicationDataBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  ApplicationDataBuilder &operator=(const ApplicationDataBuilder &);
   flatbuffers::Offset<ApplicationData> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<ApplicationData>(end);
@@ -128,9 +130,9 @@ inline flatbuffers::Offset<ApplicationData> CreateApplicationDataDirect(
 flatbuffers::Offset<ApplicationData> CreateApplicationData(flatbuffers::FlatBufferBuilder &_fbb, const ApplicationDataT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
 inline ApplicationDataT *ApplicationData::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = new ApplicationDataT();
-  UnPackTo(_o, _resolver);
-  return _o;
+  auto _o = std::unique_ptr<ApplicationDataT>(new ApplicationDataT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
 }
 
 inline void ApplicationData::UnPackTo(ApplicationDataT *_o, const flatbuffers::resolver_function_t *_resolver) const {
@@ -166,7 +168,7 @@ inline const flatbuffers::TypeTable *Vector3DTypeTable() {
     "z"
   };
   static const flatbuffers::TypeTable tt = {
-    flatbuffers::ST_STRUCT, 3, type_codes, nullptr, values, names
+    flatbuffers::ST_STRUCT, 3, type_codes, nullptr, nullptr, values, names
   };
   return &tt;
 }
@@ -182,7 +184,7 @@ inline const flatbuffers::TypeTable *ApplicationDataTypeTable() {
     "vectors"
   };
   static const flatbuffers::TypeTable tt = {
-    flatbuffers::ST_TABLE, 1, type_codes, type_refs, nullptr, names
+    flatbuffers::ST_TABLE, 1, type_codes, type_refs, nullptr, nullptr, names
   };
   return &tt;
 }

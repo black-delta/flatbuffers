@@ -15,14 +15,40 @@
  * limitations under the License.
  */
 
+#[macro_use]
+#[cfg(not(miri))]  // slow.
 extern crate quickcheck;
-
 extern crate flatbuffers;
+extern crate flexbuffers;
+extern crate rand;
+extern crate serde;
+#[macro_use]
+extern crate serde_derive;
+#[cfg(not(miri))]  // slow.
+#[macro_use]
+extern crate quickcheck_derive;
 
-#[allow(dead_code, unused_imports)]
+mod flexbuffers_tests;
+mod optional_scalars_test;
+
+#[path = "../../include_test/include_test1_generated.rs"]
+pub mod include_test1_generated;
+
+#[path = "../../include_test/sub/include_test2_generated.rs"]
+pub mod include_test2_generated;
+
 #[path = "../../monster_test_generated.rs"]
 mod monster_test_generated;
 pub use monster_test_generated::my_game;
+
+#[allow(dead_code, unused_imports)]
+#[path = "../../optional_scalars_generated.rs"]
+mod optional_scalars_generated;
+
+#[rustfmt::skip] // TODO: Use standard rust formatting and remove dead code.
+#[allow(dead_code)]
+mod flatbuffers_tests {
+use super::*;
 
 // Include simple random number generator to ensure results will be the
 // same across platforms.
@@ -153,9 +179,9 @@ fn serialized_example_is_accessible_and_correct(bytes: &[u8], identifier_require
     }
 
     let m = if size_prefixed {
-        my_game::example::get_size_prefixed_root_as_monster(bytes)
+        my_game::example::size_prefixed_root_as_monster(bytes).unwrap()
     } else {
-        my_game::example::get_root_as_monster(bytes)
+        my_game::example::root_as_monster(bytes).unwrap()
     };
 
     check_eq!(m.hp(), 80)?;
@@ -184,6 +210,7 @@ fn serialized_example_is_accessible_and_correct(bytes: &[u8], identifier_require
     let inv = m.inventory().unwrap();
     check_eq!(inv.len(), 5)?;
     check_eq!(inv.iter().sum::<u8>(), 10u8)?;
+    check_eq!(inv.iter().rev().sum::<u8>(), 10u8)?;
 
     check_is_some!(m.test4())?;
     let test4 = m.test4().unwrap();
@@ -199,6 +226,50 @@ fn serialized_example_is_accessible_and_correct(bytes: &[u8], identifier_require
 
     Ok(())
 }
+
+#[test]
+fn test_object_api_reads_correctly() -> Result<(), &'static str>{
+    let mut fbb = flatbuffers::FlatBufferBuilder::new();
+    create_serialized_example_with_library_code(&mut fbb);
+
+    let m = my_game::example::root_as_monster(fbb.finished_data()).unwrap().unpack();
+
+    check_eq!(m.hp, 80)?;
+    check_eq!(m.mana, 150)?;
+    check_eq!(m.name, "MyMonster")?;
+
+    let pos = m.pos.as_ref().unwrap();
+    check_eq!(pos.x, 1.0f32)?;
+    check_eq!(pos.y, 2.0f32)?;
+    check_eq!(pos.z, 3.0f32)?;
+    check_eq!(pos.test1, 3.0f64)?;
+    check_eq!(pos.test2, my_game::example::Color::Green)?;
+
+    let pos_test3 = &pos.test3;
+    check_eq!(pos_test3.a, 5i16)?;
+    check_eq!(pos_test3.b, 6i8)?;
+
+    let monster2 = m.test.as_monster().unwrap();
+    check_eq!(monster2.name, "Fred")?;
+
+    let inv = m.inventory.as_ref().unwrap();
+    check_eq!(inv.len(), 5)?;
+    check_eq!(inv.iter().sum::<u8>(), 10u8)?;
+    check_eq!(inv.iter().rev().sum::<u8>(), 10u8)?;
+
+    let test4 = m.test4.as_ref().unwrap();
+    check_eq!(test4.len(), 2)?;
+    check_eq!(test4[0].a as i32 + test4[0].b as i32 +
+              test4[1].a as i32 + test4[1].b as i32, 100)?;
+
+    let testarrayofstring = m.testarrayofstring.as_ref().unwrap();
+    check_eq!(testarrayofstring.len(), 2)?;
+    check_eq!(testarrayofstring[0], "test1")?;
+    check_eq!(testarrayofstring[1], "test2")?;
+    Ok(())
+}
+
+
 
 // Disabled due to Windows CI limitations.
 // #[test]
@@ -220,6 +291,109 @@ fn builder_collapses_into_vec() {
     serialized_example_is_accessible_and_correct(&backing_buf[head..], true, false).unwrap();
 }
 
+#[test]
+#[cfg(not(miri))]  // slow.
+fn verifier_one_byte_errors_do_not_crash() {
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    create_serialized_example_with_library_code(&mut b);
+    let mut badbuf = b.finished_data().to_vec();
+    // If the verifier says a buffer is okay then using it won't cause a crash.
+    // We use write_fmt since Debug visits all the fields - but there's no need to store anything.
+    struct ForgetfulWriter;
+    use std::fmt::Write;
+    impl Write for ForgetfulWriter {
+        fn write_str(&mut self, _: &str) -> Result<(), std::fmt::Error> {
+            Ok(())
+        }
+    }
+    let mut w = ForgetfulWriter;
+    for d in 1..=255u8 {
+        for i in 0..badbuf.len() {
+            let orig = badbuf[i];
+            badbuf[i] = badbuf[i].wrapping_add(d);
+            if let Ok(m) = flatbuffers::root::<my_game::example::Monster>(&badbuf) {
+                w.write_fmt(format_args!("{:?}", m)).unwrap()
+            }
+            badbuf[i] = orig;
+        }
+    }
+}
+#[test]
+#[cfg(not(miri))]  // slow.
+fn verifier_too_many_tables() {
+    use my_game::example::*;
+    let b = &mut flatbuffers::FlatBufferBuilder::new();
+    let r = Referrable::create(b, &ReferrableArgs { id: 42 });
+    let rs = b.create_vector(&vec![r; 500]);
+    let name = Some(b.create_string("foo"));
+    let m = Monster::create(b, &MonsterArgs {
+        vector_of_referrables: Some(rs),
+        name,  // required field.
+        ..Default::default()
+    });
+    b.finish(m, None);
+
+    let data = b.finished_data();
+    let mut opts = flatbuffers::VerifierOptions::default();
+
+    opts.max_tables = 500;
+    let res = flatbuffers::root_with_opts::<Monster>(&opts, data);
+    assert_eq!(res.unwrap_err(), flatbuffers::InvalidFlatbuffer::TooManyTables);
+
+    opts.max_tables += 2;
+    assert!(flatbuffers::root_with_opts::<Monster>(&opts, data).is_ok());
+}
+#[test]
+#[cfg(not(miri))]  // slow.
+fn verifier_apparent_size_too_large() {
+    use my_game::example::*;
+    let b = &mut flatbuffers::FlatBufferBuilder::new();
+    let name = Some(b.create_string("foo"));
+    // String amplification attack.
+    let s = b.create_string(&(std::iter::repeat("X").take(1000).collect::<String>()));
+    let testarrayofstring = Some(b.create_vector(&vec![s; 1000]));
+    let m = Monster::create(b, &MonsterArgs {
+        testarrayofstring,
+        name,  // required field.
+        ..Default::default()
+    });
+    b.finish(m, None);
+    let data = b.finished_data();
+    assert!(data.len() < 5100);  // est 4000 for the vector + 1000 for the string + 100 overhead.
+    let mut opts = flatbuffers::VerifierOptions::default();
+    opts.max_apparent_size = 1_000_000;
+
+    let res = flatbuffers::root_with_opts::<Monster>(&opts, data);
+    assert_eq!(res.unwrap_err(), flatbuffers::InvalidFlatbuffer::ApparentSizeTooLarge);
+
+    opts.max_apparent_size += 20_000;
+    assert!(flatbuffers::root_with_opts::<Monster>(&opts, data).is_ok());
+}
+#[test]
+fn verifier_in_too_deep() {
+    use my_game::example::*;
+    let b = &mut flatbuffers::FlatBufferBuilder::new();
+    let name = Some(b.create_string("foo"));
+    let mut prev_monster = None;
+    for _ in 0..11 {
+        prev_monster = Some(Monster::create(b, &MonsterArgs {
+            enemy: prev_monster,
+            name,  // required field.
+            ..Default::default()
+        }));
+    };
+    b.finish(prev_monster.unwrap(), None);
+    let mut opts = flatbuffers::VerifierOptions::default();
+    opts.max_depth = 10;
+
+    let data = b.finished_data();
+    let res = flatbuffers::root_with_opts::<Monster>(&opts, data);
+    assert_eq!(res.unwrap_err(), flatbuffers::InvalidFlatbuffer::DepthLimitReached);
+
+    opts.max_depth += 1;
+    assert!(flatbuffers::root_with_opts::<Monster>(&opts, data).is_ok());
+}
+
 #[cfg(test)]
 mod generated_constants {
     extern crate flatbuffers;
@@ -233,6 +407,45 @@ mod generated_constants {
     #[test]
     fn monster_file_extension() {
         assert_eq!("mon", my_game::example::MONSTER_EXTENSION);
+    }
+
+    #[test]
+    fn enum_constants_are_public() {
+        assert_eq!(-1, my_game::example::Race::ENUM_MIN);
+        assert_eq!(2, my_game::example::Race::ENUM_MAX);
+        assert_eq!(my_game::example::Race::ENUM_VALUES, [
+            my_game::example::Race::None,
+            my_game::example::Race::Human,
+            my_game::example::Race::Dwarf,
+            my_game::example::Race::Elf,
+        ]);
+
+        assert_eq!(0, my_game::example::Any::ENUM_MIN);
+        assert_eq!(3, my_game::example::Any::ENUM_MAX);
+        assert_eq!(my_game::example::Any::ENUM_VALUES, [
+            my_game::example::Any::NONE,
+            my_game::example::Any::Monster,
+            my_game::example::Any::TestSimpleTableWithEnum,
+            my_game::example::Any::MyGame_Example2_Monster,
+        ]);
+
+        assert_eq!(0, my_game::example::AnyUniqueAliases::ENUM_MIN);
+        assert_eq!(3, my_game::example::AnyUniqueAliases::ENUM_MAX);
+        assert_eq!(my_game::example::AnyUniqueAliases::ENUM_VALUES, [
+            my_game::example::AnyUniqueAliases::NONE,
+            my_game::example::AnyUniqueAliases::M,
+            my_game::example::AnyUniqueAliases::TS,
+            my_game::example::AnyUniqueAliases::M2,
+        ]);
+
+        assert_eq!(0, my_game::example::AnyAmbiguousAliases::ENUM_MIN);
+        assert_eq!(3, my_game::example::AnyAmbiguousAliases::ENUM_MAX);
+        assert_eq!(my_game::example::AnyAmbiguousAliases::ENUM_VALUES, [
+            my_game::example::AnyAmbiguousAliases::NONE,
+            my_game::example::AnyAmbiguousAliases::M1,
+            my_game::example::AnyAmbiguousAliases::M2,
+            my_game::example::AnyAmbiguousAliases::M3,
+        ]);
     }
 }
 
@@ -252,7 +465,7 @@ mod lifetime_correctness {
         let slice: &[u8] = &buf;
         let slice: &'static [u8] = unsafe { mem::transmute(slice) };
         // make sure values retrieved from the 'static buffer are themselves 'static
-        let monster: my_game::example::Monster<'static> = my_game::example::get_root_as_monster(slice);
+        let monster: my_game::example::Monster<'static> = my_game::example::root_as_monster(slice).unwrap();
         // this line should compile:
         let name: Option<&'static str> = monster._tab.get::<flatbuffers::ForwardsUOffset<&str>>(my_game::example::Monster::VT_NAME, None);
         assert_eq!(name, Some("MyMonster"));
@@ -270,7 +483,7 @@ mod lifetime_correctness {
     fn table_object_self_lifetime_in_closure() {
         // This test is designed to ensure that lifetimes for temporary intermediate tables aren't inflated beyond where the need to be.
         let buf = load_file("../monsterdata_test.mon").expect("missing monsterdata_test.mon");
-        let monster = my_game::example::get_root_as_monster(&buf);
+        let monster = my_game::example::root_as_monster(&buf).unwrap();
         let enemy: Option<my_game::example::Monster> = monster.enemy();
         // This line won't compile if "self" is required to live for the lifetime of buf above as the borrow disappears at the end of the closure.
         let enemy_of_my_enemy = enemy.map(|e| {
@@ -293,7 +506,7 @@ mod roundtrip_generated_code {
     fn build_mon<'a, 'b>(builder: &'a mut flatbuffers::FlatBufferBuilder, args: &'b my_game::example::MonsterArgs) -> my_game::example::Monster<'a> {
         let mon = my_game::example::Monster::create(builder, &args);
         my_game::example::finish_monster_buffer(builder, mon);
-        my_game::example::get_root_as_monster(builder.finished_data())
+        my_game::example::root_as_monster(builder.finished_data()).unwrap()
     }
 
     #[test]
@@ -373,7 +586,7 @@ mod roundtrip_generated_code {
             my_game::example::finish_monster_buffer(b, outer);
         }
 
-        let mon = my_game::example::get_root_as_monster(b.finished_data());
+        let mon = my_game::example::root_as_monster(b.finished_data()).unwrap();
         assert_eq!(mon.name(), "bar");
         assert_eq!(mon.test_type(), my_game::example::Any::Monster);
         assert_eq!(my_game::example::Monster::init_from_table(mon.test().unwrap()).name(),
@@ -409,7 +622,7 @@ mod roundtrip_generated_code {
             my_game::example::finish_monster_buffer(b, outer);
         }
 
-        let mon = my_game::example::get_root_as_monster(b.finished_data());
+        let mon = my_game::example::root_as_monster(b.finished_data()).unwrap();
         assert_eq!(mon.name(), "bar");
         assert_eq!(mon.enemy().unwrap().name(), "foo");
     }
@@ -439,7 +652,7 @@ mod roundtrip_generated_code {
             my_game::example::finish_monster_buffer(b, outer);
         }
 
-        let mon = my_game::example::get_root_as_monster(b.finished_data());
+        let mon = my_game::example::root_as_monster(b.finished_data()).unwrap();
         assert_eq!(mon.name(), "bar");
         assert_eq!(mon.testempty().unwrap().id(), Some("foo"));
     }
@@ -476,12 +689,12 @@ mod roundtrip_generated_code {
             b1
         };
 
-        let m = my_game::example::get_root_as_monster(b1.finished_data());
+        let m = my_game::example::root_as_monster(b1.finished_data()).unwrap();
 
         assert!(m.testnestedflatbuffer().is_some());
         assert_eq!(m.testnestedflatbuffer().unwrap(), b0.finished_data());
 
-        let m2_a = my_game::example::get_root_as_monster(m.testnestedflatbuffer().unwrap());
+        let m2_a = my_game::example::root_as_monster(m.testnestedflatbuffer().unwrap()).unwrap();
         assert_eq!(m2_a.hp(), 123);
         assert_eq!(m2_a.name(), "foobar");
 
@@ -509,6 +722,18 @@ mod roundtrip_generated_code {
         assert_eq!(m.testarrayofstring().unwrap().len(), 2);
         assert_eq!(m.testarrayofstring().unwrap().get(0), "foobar");
         assert_eq!(m.testarrayofstring().unwrap().get(1), "baz");
+
+        let rust_vec_inst = m.testarrayofstring().unwrap();
+        let rust_vec_iter_collect = rust_vec_inst.iter().collect::<Vec<_>>();
+        assert_eq!(rust_vec_iter_collect.len(), 2);
+        assert_eq!(rust_vec_iter_collect[0], "foobar");
+        assert_eq!(rust_vec_iter_collect[1], "baz");
+
+        let rust_vec_iter_rev_collect = rust_vec_inst.iter().rev().collect::<Vec<_>>();
+        assert_eq!(rust_vec_iter_rev_collect.len(), 2);
+        assert_eq!(rust_vec_iter_rev_collect[1], "foobar");
+        assert_eq!(rust_vec_iter_rev_collect[0], "baz");
+
     }
     #[test]
     fn vector_of_string_store_manual_build() {
@@ -523,6 +748,17 @@ mod roundtrip_generated_code {
         assert_eq!(m.testarrayofstring().unwrap().len(), 2);
         assert_eq!(m.testarrayofstring().unwrap().get(0), "foobar");
         assert_eq!(m.testarrayofstring().unwrap().get(1), "baz");
+
+        let rust_vec_inst = m.testarrayofstring().unwrap();
+        let rust_vec_iter_collect = rust_vec_inst.iter().collect::<Vec<_>>();
+        assert_eq!(rust_vec_iter_collect.len(), 2);
+        assert_eq!(rust_vec_iter_collect[0], "foobar");
+        assert_eq!(rust_vec_iter_collect[1], "baz");
+
+        let rust_vec_iter_rev_collect = rust_vec_inst.iter().rev().collect::<Vec<_>>();
+        assert_eq!(rust_vec_iter_rev_collect.len(), 2);
+        assert_eq!(rust_vec_iter_rev_collect[0], "baz");
+        assert_eq!(rust_vec_iter_rev_collect[1], "foobar");
     }
     #[test]
     fn vector_of_ubyte_store() {
@@ -543,6 +779,13 @@ mod roundtrip_generated_code {
             name: Some(name),
             testarrayofbools: Some(v), ..Default::default()});
         assert_eq!(m.testarrayofbools().unwrap(), &[false, true, false, true][..]);
+
+        let rust_vec_inst = m.testarrayofbools().unwrap();
+        let rust_vec_iter_collect = rust_vec_inst.iter().collect::<Vec<_>>();
+        assert_eq!(rust_vec_iter_collect, &[&false, &true, &false, &true][..]);
+
+        let rust_vec_iter_rev_collect = rust_vec_inst.iter().rev().collect::<Vec<_>>();
+        assert_eq!(rust_vec_iter_rev_collect, &[&true, &false, &true, &false][..]);
     }
     #[test]
     fn vector_of_f64_store() {
@@ -554,6 +797,15 @@ mod roundtrip_generated_code {
             vector_of_doubles: Some(v), ..Default::default()});
         assert_eq!(m.vector_of_doubles().unwrap().len(), 1);
         assert_eq!(m.vector_of_doubles().unwrap().get(0), 3.14159265359f64);
+
+        let rust_vec_inst = m.vector_of_doubles().unwrap();
+        let rust_vec_iter_collect = rust_vec_inst.iter().collect::<Vec<_>>();
+        assert_eq!(rust_vec_iter_collect.len(), 1);
+        assert_eq!(rust_vec_iter_collect[0], 3.14159265359f64);
+
+        let rust_vec_iter_rev_collect = rust_vec_inst.iter().rev().collect::<Vec<_>>();
+        assert_eq!(rust_vec_iter_rev_collect.len(), 1);
+        assert_eq!(rust_vec_iter_rev_collect[0], 3.14159265359f64);
     }
     #[test]
     fn vector_of_struct_store() {
@@ -564,6 +816,13 @@ mod roundtrip_generated_code {
             name: Some(name),
             test4: Some(v), ..Default::default()});
         assert_eq!(m.test4().unwrap(), &[my_game::example::Test::new(127, -128), my_game::example::Test::new(3, 123)][..]);
+
+        let rust_vec_inst = m.test4().unwrap();
+        let rust_vec_iter_collect = rust_vec_inst.iter().collect::<Vec<_>>();
+        assert_eq!(rust_vec_iter_collect, &[&my_game::example::Test::new(127, -128), &my_game::example::Test::new(3, 123)][..]);
+
+        let rust_vec_iter_rev_collect = rust_vec_inst.iter().rev().collect::<Vec<_>>();
+        assert_eq!(rust_vec_iter_rev_collect, &[&my_game::example::Test::new(3, 123), &my_game::example::Test::new(127, -128)][..]);
     }
     #[test]
     fn vector_of_struct_store_with_type_inference() {
@@ -577,19 +836,18 @@ mod roundtrip_generated_code {
             test4: Some(v), ..Default::default()});
         assert_eq!(m.test4().unwrap(), &[my_game::example::Test::new(127, -128), my_game::example::Test::new(3, 123), my_game::example::Test::new(100, 101)][..]);
     }
-    // TODO(rw) this passes, but I don't want to change the monster test schema right now
-    // #[test]
-    // fn vector_of_enum_store() {
-    //     let mut b = flatbuffers::FlatBufferBuilder::new();
-    //     let v = b.create_vector::<my_game::example::Color>(&[my_game::example::Color::Red, my_game::example::Color::Green][..]);
-    //     let name = b.create_string("foo");
-    //     let m = build_mon(&mut b, &my_game::example::MonsterArgs{
-    //         name: Some(name),
-    //         vector_of_enum: Some(v), ..Default::default()});
-    //     assert_eq!(m.vector_of_enum().unwrap().len(), 2);
-    //     assert_eq!(m.vector_of_enum().unwrap().get(0), my_game::example::Color::Red);
-    //     assert_eq!(m.vector_of_enum().unwrap().get(1), my_game::example::Color::Green);
-    // }
+     #[test]
+     fn vector_of_enums_store() {
+         let mut b = flatbuffers::FlatBufferBuilder::new();
+         let v = b.create_vector::<my_game::example::Color>(&[my_game::example::Color::Red, my_game::example::Color::Green][..]);
+         let name = b.create_string("foo");
+         let m = build_mon(&mut b, &my_game::example::MonsterArgs{
+             name: Some(name),
+             vector_of_enums: Some(v), ..Default::default()});
+         assert_eq!(m.vector_of_enums().unwrap().len(), 2);
+         assert_eq!(m.vector_of_enums().unwrap().get(0), my_game::example::Color::Red);
+         assert_eq!(m.vector_of_enums().unwrap().get(1), my_game::example::Color::Green);
+     }
     #[test]
     fn vector_of_table_store() {
         let b = &mut flatbuffers::FlatBufferBuilder::new();
@@ -613,6 +871,21 @@ mod roundtrip_generated_code {
         assert_eq!(m.testarrayoftables().unwrap().get(0).name(), "foo");
         assert_eq!(m.testarrayoftables().unwrap().get(1).hp(), 100);
         assert_eq!(m.testarrayoftables().unwrap().get(1).name(), "bar");
+
+        let rust_vec_inst = m.testarrayoftables().unwrap();
+        let rust_vec_iter_collect = rust_vec_inst.iter().collect::<Vec<_>>();
+        assert_eq!(rust_vec_iter_collect.len(), 2);
+        assert_eq!(rust_vec_iter_collect[0].hp(), 55);
+        assert_eq!(rust_vec_iter_collect[0].name(), "foo");
+        assert_eq!(rust_vec_iter_collect[1].hp(), 100);
+        assert_eq!(rust_vec_iter_collect[1].name(), "bar");
+
+        let rust_vec_iter_rev_collect = rust_vec_inst.iter().rev().collect::<Vec<_>>();
+        assert_eq!(rust_vec_iter_rev_collect.len(), 2);
+        assert_eq!(rust_vec_iter_rev_collect[0].hp(), 100);
+        assert_eq!(rust_vec_iter_rev_collect[0].name(), "bar");
+        assert_eq!(rust_vec_iter_rev_collect[1].hp(), 55);
+        assert_eq!(rust_vec_iter_rev_collect[1].name(), "foo");
     }
 }
 
@@ -627,11 +900,6 @@ mod generated_code_alignment_and_padding {
     }
 
     #[test]
-    fn enum_color_is_aligned_to_1() {
-        assert_eq!(1, ::std::mem::align_of::<my_game::example::Color>());
-    }
-
-    #[test]
     fn union_any_is_1_byte() {
         assert_eq!(1, ::std::mem::size_of::<my_game::example::Any>());
     }
@@ -640,25 +908,13 @@ mod generated_code_alignment_and_padding {
     fn union_any_is_aligned_to_1() {
         assert_eq!(1, ::std::mem::align_of::<my_game::example::Any>());
     }
-
     #[test]
     fn struct_test_is_4_bytes() {
         assert_eq!(4, ::std::mem::size_of::<my_game::example::Test>());
     }
-
-    #[test]
-    fn struct_test_is_aligned_to_2() {
-        assert_eq!(2, ::std::mem::align_of::<my_game::example::Test>());
-    }
-
     #[test]
     fn struct_vec3_is_32_bytes() {
         assert_eq!(32, ::std::mem::size_of::<my_game::example::Vec3>());
-    }
-
-    #[test]
-    fn struct_vec3_is_aligned_to_8() {
-        assert_eq!(8, ::std::mem::align_of::<my_game::example::Vec3>());
     }
 
     #[test]
@@ -675,25 +931,20 @@ mod generated_code_alignment_and_padding {
             my_game::example::finish_monster_buffer(b, mon);
         }
         let buf = b.finished_data();
-        let mon = my_game::example::get_root_as_monster(buf);
+        let mon = my_game::example::root_as_monster(buf).unwrap();
         let vec3 = mon.pos().unwrap();
 
         let start_ptr = buf.as_ptr() as usize;
         let vec3_ptr = vec3 as *const my_game::example::Vec3 as usize;
 
         assert!(vec3_ptr > start_ptr);
-        let aln = ::std::mem::align_of::<my_game::example::Vec3>();
-        assert_eq!((vec3_ptr - start_ptr) % aln, 0);
+        // Vec3 is aligned to 8 wrt the flatbuffer.
+        assert_eq!((vec3_ptr - start_ptr) % 8, 0);
     }
 
     #[test]
     fn struct_ability_is_8_bytes() {
         assert_eq!(8, ::std::mem::size_of::<my_game::example::Ability>());
-    }
-
-    #[test]
-    fn struct_ability_is_aligned_to_4() {
-        assert_eq!(4, ::std::mem::align_of::<my_game::example::Ability>());
     }
 
     #[test]
@@ -711,7 +962,7 @@ mod generated_code_alignment_and_padding {
             my_game::example::finish_monster_buffer(b, mon);
         }
         let buf = b.finished_data();
-        let mon = my_game::example::get_root_as_monster(buf);
+        let mon = my_game::example::root_as_monster(buf).unwrap();
         let abilities = mon.testarrayofsortedstruct().unwrap();
 
         let start_ptr = buf.as_ptr() as usize;
@@ -721,11 +972,18 @@ mod generated_code_alignment_and_padding {
             let aln = ::std::mem::align_of::<my_game::example::Ability>();
             assert_eq!((a_ptr - start_ptr) % aln, 0);
         }
+        for a in abilities.iter().rev() {
+            let a_ptr = a as *const my_game::example::Ability as usize;
+            assert!(a_ptr > start_ptr);
+            // Vec3 is aligned to 8 wrt the flatbuffer.
+            assert_eq!((a_ptr - start_ptr) % 8, 0);
+        }
     }
 }
 
 #[cfg(test)]
 mod roundtrip_byteswap {
+    #[cfg(not(miri))]  // slow.
     extern crate quickcheck;
     extern crate flatbuffers;
 
@@ -765,12 +1023,15 @@ mod roundtrip_byteswap {
         assert_eq!(x, back_again);
     }
 
-    #[test]
-    fn fuzz_f32() { quickcheck::QuickCheck::new().max_tests(N).quickcheck(prop_f32 as fn(f32)); }
-    #[test]
-    fn fuzz_f64() { quickcheck::QuickCheck::new().max_tests(N).quickcheck(prop_f64 as fn(f64)); }
+    // TODO(rw): Replace the implementations with the new stdlib endian-conversion functions.
+    // TODO(rw): Re-enable these tests (currently, rare CI failures occur that seem spurious).
+    // #[test]
+    // fn fuzz_f32() { quickcheck::QuickCheck::new().max_tests(N).quickcheck(prop_f32 as fn(f32)); }
+    // #[test]
+    // fn fuzz_f64() { quickcheck::QuickCheck::new().max_tests(N).quickcheck(prop_f64 as fn(f64)); }
 }
 
+#[cfg(not(miri))]  // slow.
 #[cfg(test)]
 mod roundtrip_vectors {
 
@@ -806,6 +1067,13 @@ mod roundtrip_vectors {
                 result_vec.push(got.get(i));
             }
             assert_eq!(result_vec, xs);
+
+            let rust_vec_iter = got.iter().collect::<Vec<T>>();
+            assert_eq!(rust_vec_iter, xs);
+
+            let mut rust_vec_rev_iter = got.iter().rev().collect::<Vec<T>>();
+            rust_vec_rev_iter.reverse();
+            assert_eq!(rust_vec_rev_iter, xs);
         }
 
         #[test]
@@ -843,6 +1111,7 @@ mod roundtrip_vectors {
 
     #[cfg(test)]
     mod create_vector_direct {
+        #[cfg(not(miri))]  // slow.
         extern crate quickcheck;
         extern crate flatbuffers;
 
@@ -890,6 +1159,7 @@ mod roundtrip_vectors {
 
     #[cfg(test)]
     mod string_manual_build {
+        #[cfg(not(miri))]  // slow.
         extern crate quickcheck;
         extern crate flatbuffers;
 
@@ -927,6 +1197,7 @@ mod roundtrip_vectors {
 
     #[cfg(test)]
     mod string_helper_build {
+        #[cfg(not(miri))]  // slow.
         extern crate quickcheck;
         extern crate flatbuffers;
 
@@ -957,9 +1228,11 @@ mod roundtrip_vectors {
 
     #[cfg(test)]
     mod ubyte {
+        #[cfg(not(miri))]  // slow.
         extern crate quickcheck;
         extern crate flatbuffers;
 
+        #[cfg(not(miri))]  // slow.
         #[test]
         fn fuzz_manual_build() {
             fn prop(vec: Vec<u8>) {
@@ -1003,7 +1276,7 @@ mod framing_format {
 
         // Access it.
         let buf = b.finished_data();
-        let m = flatbuffers::get_size_prefixed_root::<my_game::example::Monster>(buf);
+        let m = flatbuffers::size_prefixed_root::<my_game::example::Monster>(buf).unwrap();
         assert_eq!(m.mana(), 200);
         assert_eq!(m.hp(), 300);
         assert_eq!(m.name(), "bob");
@@ -1015,11 +1288,13 @@ mod roundtrip_table {
     use std::collections::HashMap;
 
     extern crate flatbuffers;
+    #[cfg(not(miri))]  // slow.
     extern crate quickcheck;
 
     use super::LCG;
 
     #[test]
+    #[cfg(not(miri))]  // slow.
     fn table_of_mixed_scalars_fuzz() {
         // Values we're testing against: chosen to ensure no bits get chopped
         // off anywhere, and also be different from eachother.
@@ -1127,6 +1402,7 @@ mod roundtrip_table {
     }
 
     #[test]
+    #[cfg(not(miri))]  // slow.
     fn table_of_byte_strings_fuzz() {
         fn prop(vec: Vec<Vec<u8>>) {
             use flatbuffers::field_index_to_field_offset as fi2fo;
@@ -1163,6 +1439,7 @@ mod roundtrip_table {
     }
 
     #[test]
+    #[cfg(not(miri))]  // slow.
     fn fuzz_table_of_strings() {
         fn prop(vec: Vec<String>) {
             use flatbuffers::field_index_to_field_offset as fi2fo;
@@ -1194,8 +1471,10 @@ mod roundtrip_table {
         quickcheck::QuickCheck::new().max_tests(n).quickcheck(prop as fn(Vec<String>));
     }
 
+    #[cfg(not(miri))]  // slow.
     mod table_of_vectors_of_scalars {
         extern crate flatbuffers;
+        #[cfg(not(miri))]  // slow.
         extern crate quickcheck;
 
         const N: u64 = 20;
@@ -1276,9 +1555,11 @@ mod roundtrip_table {
     }
 }
 
+#[cfg(not(miri))]  // slow.
 #[cfg(test)]
 mod roundtrip_scalars {
     extern crate flatbuffers;
+    #[cfg(not(miri))]  // slow.
     extern crate quickcheck;
 
     const N: u64 = 1000;
@@ -1319,8 +1600,10 @@ mod roundtrip_scalars {
 }
 
 #[cfg(test)]
+#[cfg(not(miri))]  // slow.
 mod roundtrip_push_follow_scalars {
     extern crate flatbuffers;
+    #[cfg(not(miri))]  // slow.
     extern crate quickcheck;
 
     use flatbuffers::Push;
@@ -1394,6 +1677,59 @@ mod write_and_read_examples {
     }
 
     #[test]
+    fn generated_code_debug_prints_correctly() {
+        let b = &mut flatbuffers::FlatBufferBuilder::new();
+        create_serialized_example_with_generated_code(b);
+        let buf = b.finished_data();
+        serialized_example_is_accessible_and_correct(&buf, true, false).unwrap();
+        let m = super::my_game::example::root_as_monster(buf).unwrap();
+        assert_eq!(
+            format!("{:.5?}", &m),
+            "Monster { pos: Some(Vec3 { x: 1.00000, y: 2.00000, z: 3.00000, \
+            test1: 3.00000, test2: Green, test3: Test { a: 5, b: 6 } }), \
+            mana: 150, hp: 80, name: \"MyMonster\", \
+            inventory: Some([0, 1, 2, 3, 4]), color: Blue, test_type: Monster, \
+            test: Monster { pos: None, mana: 150, hp: 100, name: \"Fred\", \
+            inventory: None, color: Blue, test_type: NONE, test: None, \
+            test4: None, testarrayofstring: None, testarrayoftables: None, \
+            enemy: None, testnestedflatbuffer: None, testempty: None, \
+            testbool: false, testhashs32_fnv1: 0, testhashu32_fnv1: 0, \
+            testhashs64_fnv1: 0, testhashu64_fnv1: 0, testhashs32_fnv1a: 0, \
+            testhashu32_fnv1a: 0, testhashs64_fnv1a: 0, testhashu64_fnv1a: 0, \
+            testarrayofbools: None, testf: 3.14159, testf2: 3.00000, testf3: 0.00000, \
+            testarrayofstring2: None, testarrayofsortedstruct: None, flex: None, \
+            test5: None, vector_of_longs: None, vector_of_doubles: None, \
+            parent_namespace_test: None, vector_of_referrables: None, \
+            single_weak_reference: 0, vector_of_weak_references: None, \
+            vector_of_strong_referrables: None, co_owning_reference: 0, \
+            vector_of_co_owning_references: None, non_owning_reference: 0, \
+            vector_of_non_owning_references: None, any_unique_type: NONE, \
+            any_unique: None, any_ambiguous_type: NONE, any_ambiguous: None, \
+            vector_of_enums: None, signed_enum: None, \
+            testrequirednestedflatbuffer: None, scalar_key_sorted_tables: None }, \
+            test4: Some([Test { a: 10, b: 20 }, Test { a: 30, b: 40 }]), \
+            testarrayofstring: Some([\"test1\", \"test2\"]), \
+            testarrayoftables: None, enemy: None, testnestedflatbuffer: None, \
+            testempty: None, testbool: false, testhashs32_fnv1: 0, \
+            testhashu32_fnv1: 0, testhashs64_fnv1: 0, testhashu64_fnv1: 0, \
+            testhashs32_fnv1a: 0, testhashu32_fnv1a: 0, testhashs64_fnv1a: 0, \
+            testhashu64_fnv1a: 0, testarrayofbools: None, testf: 3.14159, \
+            testf2: 3.00000, testf3: 0.00000, testarrayofstring2: None, \
+            testarrayofsortedstruct: None, flex: None, test5: None, \
+            vector_of_longs: None, vector_of_doubles: None, \
+            parent_namespace_test: None, vector_of_referrables: None, \
+            single_weak_reference: 0, vector_of_weak_references: None, \
+            vector_of_strong_referrables: None, co_owning_reference: 0, \
+            vector_of_co_owning_references: None, non_owning_reference: 0, \
+            vector_of_non_owning_references: None, any_unique_type: NONE, \
+            any_unique: None, any_ambiguous_type: NONE, any_ambiguous: None, \
+            vector_of_enums: None, signed_enum: None, \
+            testrequirednestedflatbuffer: None, scalar_key_sorted_tables: None }"
+        );
+    }
+
+    #[test]
+    #[cfg(not(miri))]  // slow.
     fn generated_code_creates_correct_example_repeatedly_with_reset() {
         let b = &mut flatbuffers::FlatBufferBuilder::new();
         for _ in 0..100 {
@@ -1415,6 +1751,7 @@ mod write_and_read_examples {
     }
 
     #[test]
+    #[cfg(not(miri))]  // slow.
     fn library_code_creates_correct_example_repeatedly_with_reset() {
         let b = &mut flatbuffers::FlatBufferBuilder::new();
         for _ in 0..100 {
@@ -1537,7 +1874,7 @@ mod generated_key_comparisons {
         let builder = &mut flatbuffers::FlatBufferBuilder::new();
         super::create_serialized_example_with_library_code(builder);
         let buf = builder.finished_data();
-        let a = my_game::example::get_root_as_monster(buf);
+        let a = my_game::example::root_as_monster(buf).unwrap();
 
         // preconditions
         assert_eq!(a.name(), "MyMonster");
@@ -1553,7 +1890,7 @@ mod generated_key_comparisons {
         let builder = &mut flatbuffers::FlatBufferBuilder::new();
         super::create_serialized_example_with_library_code(builder);
         let buf = builder.finished_data();
-        let a = my_game::example::get_root_as_monster(buf);
+        let a = my_game::example::root_as_monster(buf).unwrap();
         let b = a.test_as_monster().unwrap();
 
         // preconditions
@@ -1738,14 +2075,6 @@ mod follow_impls {
         let vec: Vec<u8> = vec![255, 255, 255, 255, 3, 0, 0, 0, 1, 2, 3, 0];
         let off: flatbuffers::FollowStart<flatbuffers::Vector<u8>> = flatbuffers::FollowStart::new();
         assert_eq!(off.self_follow(&vec[..], 4).safe_slice(), &[1, 2, 3][..]);
-    }
-
-    #[cfg(target_endian = "little")]
-    #[test]
-    fn to_slice_of_u16() {
-        let vec: Vec<u8> = vec![255, 255, 255, 255, 2, 0, 0, 0, 1, 2, 3, 4];
-        let off: flatbuffers::FollowStart<&[u16]> = flatbuffers::FollowStart::new();
-        assert_eq!(off.self_follow(&vec[..], 4), &vec![513, 1027][..]);
     }
 
     #[test]
@@ -2080,6 +2409,7 @@ mod vtable_deduplication {
         ]);
     }
 
+    #[cfg(not(miri))]  // slow.
     #[test]
     fn many_identical_tables_use_few_vtables() {
         let mut b = flatbuffers::FlatBufferBuilder::new();
@@ -2278,6 +2608,25 @@ mod byte_layouts {
              // entry 1 is zero and not stored.
              4, 0, 0, 0, // offset for start of vtable (int32)
         ]);
+    }
+
+    #[test]
+    fn layout_09b_vtable_with_one_default_bool_force_defaults() {
+        let mut b = flatbuffers::FlatBufferBuilder::new();
+        check(&b, &[]);
+        let off = b.start_table();
+        check(&b, &[]);
+        b.force_defaults(true);
+        b.push_slot(fi2fo(0), false, false);
+        b.end_table(off);
+        check(&b, &[
+            6, 0, // vtable bytes
+            8, 0, // length of object including vtable offset
+            7, 0, // start of bool value
+            6, 0, 0, 0, // offset for start of vtable (int32)
+            0, 0, 0, // padded to 4 bytes
+            0, // bool value
+      ]);
     }
 
     #[test]
@@ -2694,6 +3043,33 @@ mod byte_layouts {
     }
 }
 
+#[cfg(test)]
+mod copy_clone_traits {
+    #[test]
+    fn follow_types_implement_copy_and_clone() {
+        static_assertions::assert_impl_all!(flatbuffers::WIPOffset<u32>: Copy, Clone);
+        static_assertions::assert_impl_all!(flatbuffers::WIPOffset<Vec<u32>>: Copy, Clone);
+
+        static_assertions::assert_impl_all!(flatbuffers::ForwardsUOffset<u32>: Copy, Clone);
+        static_assertions::assert_impl_all!(flatbuffers::ForwardsUOffset<Vec<u32>>: Copy, Clone);
+
+        static_assertions::assert_impl_all!(flatbuffers::Vector<'static, u32>: Copy, Clone);
+        static_assertions::assert_impl_all!(flatbuffers::Vector<'static, Vec<u32>>: Copy, Clone);
+    }
+}
+
+#[cfg(test)]
+mod fully_qualified_name {
+    #[test]
+    fn fully_qualified_name_generated() {
+        assert!(check_eq!(::my_game::example::Monster::get_fully_qualified_name(), "MyGame.Example.Monster").is_ok());
+        assert!(check_eq!(::my_game::example_2::Monster::get_fully_qualified_name(), "MyGame.Example2.Monster").is_ok());
+
+        assert!(check_eq!(::my_game::example::Vec3::get_fully_qualified_name(), "MyGame.Example.Vec3").is_ok());
+        assert!(check_eq!(::my_game::example::Ability::get_fully_qualified_name(), "MyGame.Example.Ability").is_ok());
+    }
+}
+
 // this is not technically a test, but we want to always keep this generated
 // file up-to-date, and the simplest way to do that is to make sure that when
 // tests are run, the file is generated.
@@ -2713,4 +3089,52 @@ fn load_file(filename: &str) -> Result<Vec<u8>, std::io::Error> {
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+#[test]
+fn test_shared_strings() {
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let offset1 = builder.create_shared_string("welcome to flatbuffers!!");
+    let offset2 = builder.create_shared_string("welcome");
+    let offset3 = builder.create_shared_string("welcome to flatbuffers!!");
+    assert_ne!(offset2.value(), offset3.value());
+    assert_eq!(offset1.value(), offset3.value());
+    builder.reset();
+    let offset4 = builder.create_shared_string("welcome");
+    let offset5 = builder.create_shared_string("welcome to flatbuffers!!");
+    assert_ne!(offset2.value(), offset4.value());
+    assert_ne!(offset5.value(), offset1.value());
+    builder.reset();
+
+    // Checks if the shared string function would always work with
+    // an object in between the writes
+    let name = builder.create_shared_string("foo");
+    let enemy = my_game::example::Monster::create(&mut builder, &my_game::example::MonsterArgs {
+        name: Some(name),
+        ..Default::default()
+    });
+    let secondary_name = builder.create_shared_string("foo");
+    assert_eq!(name.value(), secondary_name.value());
+
+    // Builds a new monster object and embeds enemy into it so we can verify
+    // that shared strings are working.
+    let args = my_game::example::MonsterArgs {
+        name: Some(secondary_name),
+        enemy: Some(enemy),
+        testarrayofstring: Some(builder.create_vector(&[name, secondary_name])),
+        ..Default::default()
+    };
+    // Building secondary monster
+    let main_monster = my_game::example::Monster::create(&mut builder, &args);
+    builder.finish(main_monster, None);
+    let monster = my_game::example::root_as_monster(builder.finished_data()).unwrap();
+
+    // Checks if the embedded object (Enemy) name is foo
+    assert_eq!(monster.enemy().unwrap().name(), "foo");
+    let string_vector = monster.testarrayofstring().unwrap();
+    // Check if the vector will have the same string
+    assert_eq!(string_vector.get(0), "foo");
+    assert_eq!(string_vector.get(1), "foo");
+}
+
 }

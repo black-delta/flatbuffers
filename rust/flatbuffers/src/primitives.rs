@@ -18,9 +18,9 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Deref;
 
-use endian_scalar::{emplace_scalar, read_scalar, read_scalar_at};
-use follow::Follow;
-use push::Push;
+use crate::endian_scalar::{emplace_scalar, read_scalar, read_scalar_at};
+use crate::follow::Follow;
+use crate::push::Push;
 
 pub const FLATBUFFERS_MAX_BUFFER_SIZE: usize = (1u64 << 31) as usize;
 
@@ -49,15 +49,14 @@ pub const SIZE_VOFFSET: usize = SIZE_I16;
 
 pub const SIZE_SIZEPREFIX: usize = SIZE_UOFFSET;
 
-/// SOffsetT is an i32 that is used by tables to reference their vtables.
+/// SOffsetT is a relative pointer from tables to their vtables.
 pub type SOffsetT = i32;
 
-/// UOffsetT is a u32 that is used by pervasively to represent both pointers
-/// and lengths of vectors.
+/// UOffsetT is used represent both for relative pointers and lengths of vectors.
 pub type UOffsetT = u32;
 
-/// VOffsetT is a i32 that is used by vtables to store field data.
-pub type VOffsetT = i16;
+/// VOffsetT is a relative pointer in vtables to point from tables to field data.
+pub type VOffsetT = u16;
 
 /// TableFinishedWIPOffset marks a WIPOffset as being for a finished table.
 #[derive(Clone, Copy)]
@@ -79,8 +78,22 @@ pub struct VTableWIPOffset {}
 /// data relative to the *end* of an in-progress FlatBuffer. The
 /// FlatBufferBuilder uses this to track the location of objects in an absolute
 /// way. The impl of Push converts a WIPOffset into a ForwardsUOffset.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct WIPOffset<T>(UOffsetT, PhantomData<T>);
+
+// We cannot use derive for these two impls, as the derived impls would only
+// implement `Copy` and `Clone` for `T: Copy` and `T: Clone` respectively.
+// However `WIPOffset<T>` can always be copied, no matter that `T` you
+// have.
+impl<T> Copy for WIPOffset<T> {}
+impl<T> Clone for WIPOffset<T> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Eq for WIPOffset<T> {}
 
 impl<T> PartialEq for WIPOffset<T> {
     fn eq(&self, o: &WIPOffset<T>) -> bool {
@@ -108,12 +121,12 @@ impl<'a, T: 'a> WIPOffset<T> {
     /// Return a wrapped value that brings its meaning as a union WIPOffset
     /// into the type system.
     #[inline(always)]
-    pub fn as_union_value(&self) -> WIPOffset<UnionWIPOffset> {
+    pub fn as_union_value(self) -> WIPOffset<UnionWIPOffset> {
         WIPOffset::new(self.0)
     }
     /// Get the underlying value.
     #[inline(always)]
-    pub fn value(&self) -> UOffsetT {
+    pub fn value(self) -> UOffsetT {
         self.0
     }
 }
@@ -139,11 +152,24 @@ impl<T> Push for ForwardsUOffset<T> {
 
 /// ForwardsUOffset is used by Follow to traverse a FlatBuffer: the pointer
 /// is incremented by the value contained in this type.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct ForwardsUOffset<T>(UOffsetT, PhantomData<T>);
+
+// We cannot use derive for these two impls, as the derived impls would only
+// implement `Copy` and `Clone` for `T: Copy` and `T: Clone` respectively.
+// However `ForwardsUOffset<T>` can always be copied, no matter that `T` you
+// have.
+impl<T> Copy for ForwardsUOffset<T> {}
+impl<T> Clone for ForwardsUOffset<T> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 impl<T> ForwardsUOffset<T> {
     #[inline(always)]
-    pub fn value(&self) -> UOffsetT {
+    pub fn value(self) -> UOffsetT {
         self.0
     }
 }

@@ -12,9 +12,11 @@ namespace Sample {
 struct Vec3;
 
 struct Monster;
+struct MonsterBuilder;
 struct MonsterT;
 
 struct Weapon;
+struct WeaponBuilder;
 struct WeaponT;
 
 bool operator==(const Vec3 &lhs, const Vec3 &rhs);
@@ -30,7 +32,7 @@ inline const flatbuffers::TypeTable *MonsterTypeTable();
 
 inline const flatbuffers::TypeTable *WeaponTypeTable();
 
-enum Color {
+enum Color : int8_t {
   Color_Red = 0,
   Color_Green = 1,
   Color_Blue = 2,
@@ -58,12 +60,12 @@ inline const char * const *EnumNamesColor() {
 }
 
 inline const char *EnumNameColor(Color e) {
-  if (e < Color_Red || e > Color_Blue) return "";
+  if (flatbuffers::IsOutRange(e, Color_Red, Color_Blue)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesColor()[index];
 }
 
-enum Equipment {
+enum Equipment : uint8_t {
   Equipment_NONE = 0,
   Equipment_Weapon = 1,
   Equipment_MIN = Equipment_NONE,
@@ -88,7 +90,7 @@ inline const char * const *EnumNamesEquipment() {
 }
 
 inline const char *EnumNameEquipment(Equipment e) {
-  if (e < Equipment_NONE || e > Equipment_Weapon) return "";
+  if (flatbuffers::IsOutRange(e, Equipment_NONE, Equipment_Weapon)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesEquipment()[index];
 }
@@ -109,8 +111,8 @@ struct EquipmentUnion {
   EquipmentUnion(EquipmentUnion&& u) FLATBUFFERS_NOEXCEPT :
     type(Equipment_NONE), value(nullptr)
     { std::swap(type, u.type); std::swap(value, u.value); }
-  EquipmentUnion(const EquipmentUnion &) FLATBUFFERS_NOEXCEPT;
-  EquipmentUnion &operator=(const EquipmentUnion &u) FLATBUFFERS_NOEXCEPT
+  EquipmentUnion(const EquipmentUnion &);
+  EquipmentUnion &operator=(const EquipmentUnion &u)
     { EquipmentUnion t(u); std::swap(type, t.type); std::swap(value, t.value); return *this; }
   EquipmentUnion &operator=(EquipmentUnion &&u) FLATBUFFERS_NOEXCEPT
     { std::swap(type, u.type); std::swap(value, u.value); return *this; }
@@ -177,8 +179,10 @@ FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) Vec3 FLATBUFFERS_FINAL_CLASS {
   static const flatbuffers::TypeTable *MiniReflectTypeTable() {
     return Vec3TypeTable();
   }
-  Vec3() {
-    memset(static_cast<void *>(this), 0, sizeof(Vec3));
+  Vec3()
+      : x_(0),
+        y_(0),
+        z_(0) {
   }
   Vec3(float _x, float _y, float _z)
       : x_(flatbuffers::EndianScalar(_x)),
@@ -220,20 +224,15 @@ inline bool operator!=(const Vec3 &lhs, const Vec3 &rhs) {
 
 struct MonsterT : public flatbuffers::NativeTable {
   typedef Monster TableType;
-  flatbuffers::unique_ptr<MyGame::Sample::Vec3> pos;
-  int16_t mana;
-  int16_t hp;
-  std::string name;
-  std::vector<uint8_t> inventory;
-  MyGame::Sample::Color color;
-  std::vector<flatbuffers::unique_ptr<MyGame::Sample::WeaponT>> weapons;
-  EquipmentUnion equipped;
-  std::vector<MyGame::Sample::Vec3> path;
-  MonsterT()
-      : mana(150),
-        hp(100),
-        color(MyGame::Sample::Color_Blue) {
-  }
+  flatbuffers::unique_ptr<MyGame::Sample::Vec3> pos{};
+  int16_t mana = 150;
+  int16_t hp = 100;
+  std::string name{};
+  std::vector<uint8_t> inventory{};
+  MyGame::Sample::Color color = MyGame::Sample::Color_Blue;
+  std::vector<flatbuffers::unique_ptr<MyGame::Sample::WeaponT>> weapons{};
+  MyGame::Sample::EquipmentUnion equipped{};
+  std::vector<MyGame::Sample::Vec3> path{};
 };
 
 inline bool operator==(const MonsterT &lhs, const MonsterT &rhs) {
@@ -256,6 +255,7 @@ inline bool operator!=(const MonsterT &lhs, const MonsterT &rhs) {
 
 struct Monster FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   typedef MonsterT NativeTableType;
+  typedef MonsterBuilder Builder;
   static const flatbuffers::TypeTable *MiniReflectTypeTable() {
     return MonsterTypeTable();
   }
@@ -316,9 +316,6 @@ struct Monster FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   MyGame::Sample::Equipment equipped_type() const {
     return static_cast<MyGame::Sample::Equipment>(GetField<uint8_t>(VT_EQUIPPED_TYPE, 0));
   }
-  bool mutate_equipped_type(MyGame::Sample::Equipment _equipped_type) {
-    return SetField<uint8_t>(VT_EQUIPPED_TYPE, static_cast<uint8_t>(_equipped_type), 0);
-  }
   const void *equipped() const {
     return GetPointer<const void *>(VT_EQUIPPED);
   }
@@ -365,6 +362,7 @@ template<> inline const MyGame::Sample::Weapon *Monster::equipped_as<MyGame::Sam
 }
 
 struct MonsterBuilder {
+  typedef Monster Table;
   flatbuffers::FlatBufferBuilder &fbb_;
   flatbuffers::uoffset_t start_;
   void add_pos(const MyGame::Sample::Vec3 *pos) {
@@ -401,7 +399,6 @@ struct MonsterBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  MonsterBuilder &operator=(const MonsterBuilder &);
   flatbuffers::Offset<Monster> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Monster>(end);
@@ -469,11 +466,8 @@ flatbuffers::Offset<Monster> CreateMonster(flatbuffers::FlatBufferBuilder &_fbb,
 
 struct WeaponT : public flatbuffers::NativeTable {
   typedef Weapon TableType;
-  std::string name;
-  int16_t damage;
-  WeaponT()
-      : damage(0) {
-  }
+  std::string name{};
+  int16_t damage = 0;
 };
 
 inline bool operator==(const WeaponT &lhs, const WeaponT &rhs) {
@@ -489,6 +483,7 @@ inline bool operator!=(const WeaponT &lhs, const WeaponT &rhs) {
 
 struct Weapon FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   typedef WeaponT NativeTableType;
+  typedef WeaponBuilder Builder;
   static const flatbuffers::TypeTable *MiniReflectTypeTable() {
     return WeaponTypeTable();
   }
@@ -521,6 +516,7 @@ struct Weapon FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
 };
 
 struct WeaponBuilder {
+  typedef Weapon Table;
   flatbuffers::FlatBufferBuilder &fbb_;
   flatbuffers::uoffset_t start_;
   void add_name(flatbuffers::Offset<flatbuffers::String> name) {
@@ -533,7 +529,6 @@ struct WeaponBuilder {
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  WeaponBuilder &operator=(const WeaponBuilder &);
   flatbuffers::Offset<Weapon> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = flatbuffers::Offset<Weapon>(end);
@@ -565,9 +560,9 @@ inline flatbuffers::Offset<Weapon> CreateWeaponDirect(
 flatbuffers::Offset<Weapon> CreateWeapon(flatbuffers::FlatBufferBuilder &_fbb, const WeaponT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
 inline MonsterT *Monster::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = new MonsterT();
-  UnPackTo(_o, _resolver);
-  return _o;
+  auto _o = std::unique_ptr<MonsterT>(new MonsterT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
 }
 
 inline void Monster::UnPackTo(MonsterT *_o, const flatbuffers::resolver_function_t *_resolver) const {
@@ -577,11 +572,11 @@ inline void Monster::UnPackTo(MonsterT *_o, const flatbuffers::resolver_function
   { auto _e = mana(); _o->mana = _e; }
   { auto _e = hp(); _o->hp = _e; }
   { auto _e = name(); if (_e) _o->name = _e->str(); }
-  { auto _e = inventory(); if (_e) { _o->inventory.resize(_e->size()); for (flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->inventory[_i] = _e->Get(_i); } } }
+  { auto _e = inventory(); if (_e) { _o->inventory.resize(_e->size()); std::copy(_e->begin(), _e->end(), _o->inventory.begin()); } }
   { auto _e = color(); _o->color = _e; }
   { auto _e = weapons(); if (_e) { _o->weapons.resize(_e->size()); for (flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->weapons[_i] = flatbuffers::unique_ptr<MyGame::Sample::WeaponT>(_e->Get(_i)->UnPack(_resolver)); } } }
   { auto _e = equipped_type(); _o->equipped.type = _e; }
-  { auto _e = equipped(); if (_e) _o->equipped.value = EquipmentUnion::UnPack(_e, equipped_type(), _resolver); }
+  { auto _e = equipped(); if (_e) _o->equipped.value = MyGame::Sample::EquipmentUnion::UnPack(_e, equipped_type(), _resolver); }
   { auto _e = path(); if (_e) { _o->path.resize(_e->size()); for (flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->path[_i] = *_e->Get(_i); } } }
 }
 
@@ -618,9 +613,9 @@ inline flatbuffers::Offset<Monster> CreateMonster(flatbuffers::FlatBufferBuilder
 }
 
 inline WeaponT *Weapon::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = new WeaponT();
-  UnPackTo(_o, _resolver);
-  return _o;
+  auto _o = std::unique_ptr<WeaponT>(new WeaponT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
 }
 
 inline void Weapon::UnPackTo(WeaponT *_o, const flatbuffers::resolver_function_t *_resolver) const {
@@ -655,7 +650,7 @@ inline bool VerifyEquipment(flatbuffers::Verifier &verifier, const void *obj, Eq
       auto ptr = reinterpret_cast<const MyGame::Sample::Weapon *>(obj);
       return verifier.VerifyTable(ptr);
     }
-    default: return false;
+    default: return true;
   }
 }
 
@@ -691,7 +686,7 @@ inline flatbuffers::Offset<void> EquipmentUnion::Pack(flatbuffers::FlatBufferBui
   }
 }
 
-inline EquipmentUnion::EquipmentUnion(const EquipmentUnion &u) FLATBUFFERS_NOEXCEPT : type(u.type), value(nullptr) {
+inline EquipmentUnion::EquipmentUnion(const EquipmentUnion &u) : type(u.type), value(nullptr) {
   switch (type) {
     case Equipment_Weapon: {
       value = new MyGame::Sample::WeaponT(*reinterpret_cast<MyGame::Sample::WeaponT *>(u.value));
@@ -730,7 +725,7 @@ inline const flatbuffers::TypeTable *ColorTypeTable() {
     "Blue"
   };
   static const flatbuffers::TypeTable tt = {
-    flatbuffers::ST_ENUM, 3, type_codes, type_refs, nullptr, names
+    flatbuffers::ST_ENUM, 3, type_codes, type_refs, nullptr, nullptr, names
   };
   return &tt;
 }
@@ -748,7 +743,7 @@ inline const flatbuffers::TypeTable *EquipmentTypeTable() {
     "Weapon"
   };
   static const flatbuffers::TypeTable tt = {
-    flatbuffers::ST_UNION, 2, type_codes, type_refs, nullptr, names
+    flatbuffers::ST_UNION, 2, type_codes, type_refs, nullptr, nullptr, names
   };
   return &tt;
 }
@@ -766,7 +761,7 @@ inline const flatbuffers::TypeTable *Vec3TypeTable() {
     "z"
   };
   static const flatbuffers::TypeTable tt = {
-    flatbuffers::ST_STRUCT, 3, type_codes, nullptr, values, names
+    flatbuffers::ST_STRUCT, 3, type_codes, nullptr, nullptr, values, names
   };
   return &tt;
 }
@@ -805,7 +800,7 @@ inline const flatbuffers::TypeTable *MonsterTypeTable() {
     "path"
   };
   static const flatbuffers::TypeTable tt = {
-    flatbuffers::ST_TABLE, 11, type_codes, type_refs, nullptr, names
+    flatbuffers::ST_TABLE, 11, type_codes, type_refs, nullptr, nullptr, names
   };
   return &tt;
 }
@@ -820,7 +815,7 @@ inline const flatbuffers::TypeTable *WeaponTypeTable() {
     "damage"
   };
   static const flatbuffers::TypeTable tt = {
-    flatbuffers::ST_TABLE, 2, type_codes, nullptr, nullptr, names
+    flatbuffers::ST_TABLE, 2, type_codes, nullptr, nullptr, nullptr, names
   };
   return &tt;
 }
